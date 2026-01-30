@@ -42,6 +42,10 @@ const INCLUDE_BY_CAMPAIGN_TYPE = true; // If true, add Raw + Charts tabs for Sea
 // Set false to classify Pmax terms using BRAND_TOKENS (useful for historical comparison).
 const PMAX_TREAT_ALL_AS_NON_BRANDED = false;
 
+// Pmax Consumer Spotlight: Add tabs showing category-level data from campaign_search_term_insight.
+// This shows search categories (themes) instead of individual terms. No cost metrics available.
+const INCLUDE_PMAX_CATEGORIES = true;
+
 // ===== HELPERS =====
 
 function getSheetId(sheetIdentifier) {
@@ -278,6 +282,152 @@ function processCampaignSearchTermView() {
   return { totals: totals, periodData: periodData };
 }
 
+// Pmax Consumer Spotlight: campaign_search_term_insight provides category-level data.
+// No cost metrics available; only impressions, clicks, conversions, conversion value.
+// Note: This resource doesn't support segments.month/week/date with campaign_id filter,
+// so we run separate queries for each time period.
+function processCampaignSearchTermInsight() {
+  const timeZone = AdsApp.currentAccount().getTimeZone();
+
+  // First get all Pmax campaign IDs
+  const campaignQuery = [
+    'SELECT campaign.id, campaign.name',
+    'FROM campaign',
+    "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'",
+    "  AND campaign.status != 'REMOVED'"
+  ].join('\n');
+
+  const campaignIds = [];
+  const campaignReport = AdsApp.search(campaignQuery);
+  while (campaignReport.hasNext()) {
+    const row = campaignReport.next();
+    if (row.campaign && row.campaign.id) {
+      campaignIds.push(row.campaign.id);
+    }
+  }
+
+  if (campaignIds.length === 0) {
+    Logger.log('[Pmax Categories] No Pmax campaigns found.');
+    return { totals: { branded: emptyMetrics(), nonBranded: emptyMetrics() }, periodData: {} };
+  }
+
+  Logger.log('[Pmax Categories] Found ' + campaignIds.length + ' Pmax campaign(s).');
+
+  // Calculate period date ranges based on config
+  function getPeriodRanges() {
+    let startDate, endDate;
+    if (START_DATE && END_DATE) {
+      startDate = new Date(START_DATE);
+      endDate = new Date(END_DATE);
+    } else {
+      endDate = new Date();
+      startDate = new Date();
+      startDate.setDate(endDate.getDate() - LOOKBACK_DAYS);
+    }
+
+    const periods = [];
+    if (TIME_GRANULARITY === 'week') {
+      // Generate week ranges (Monday to Sunday)
+      let current = new Date(startDate);
+      // Move to Monday of the first week
+      const dayOfWeek = current.getDay();
+      const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+      current.setDate(current.getDate() + diff);
+
+      while (current <= endDate) {
+        const weekStart = new Date(current);
+        const weekEnd = new Date(current);
+        weekEnd.setDate(weekEnd.getDate() + 6);
+        const periodKey = Utilities.formatDate(weekStart, timeZone, 'yyyy-MM-dd');
+        periods.push({
+          key: periodKey,
+          start: Utilities.formatDate(weekStart, timeZone, 'yyyy-MM-dd'),
+          end: Utilities.formatDate(weekEnd > endDate ? endDate : weekEnd, timeZone, 'yyyy-MM-dd')
+        });
+        current.setDate(current.getDate() + 7);
+      }
+    } else {
+      // Generate month ranges
+      let current = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+      while (current <= endDate) {
+        const monthStart = new Date(current);
+        const monthEnd = new Date(current.getFullYear(), current.getMonth() + 1, 0); // Last day of month
+        const periodKey = Utilities.formatDate(monthStart, timeZone, 'yyyy-MM');
+        periods.push({
+          key: periodKey,
+          start: Utilities.formatDate(monthStart < startDate ? startDate : monthStart, timeZone, 'yyyy-MM-dd'),
+          end: Utilities.formatDate(monthEnd > endDate ? endDate : monthEnd, timeZone, 'yyyy-MM-dd')
+        });
+        current.setMonth(current.getMonth() + 1);
+      }
+    }
+    return periods;
+  }
+
+  const periodRanges = getPeriodRanges();
+  Logger.log('[Pmax Categories] Processing ' + periodRanges.length + ' period(s).');
+
+  const totals = { branded: emptyMetrics(), nonBranded: emptyMetrics() };
+  const periodData = {};
+
+  // Query each period separately (no segments needed)
+  for (let p = 0; p < periodRanges.length; p++) {
+    const period = periodRanges[p];
+    const dateClause = "segments.date BETWEEN '" + period.start + "' AND '" + period.end + "'";
+
+    for (let i = 0; i < campaignIds.length; i++) {
+      const campaignId = campaignIds[i];
+      const query = [
+        'SELECT',
+        '  campaign_search_term_insight.category_label,',
+        '  metrics.impressions,',
+        '  metrics.clicks,',
+        '  metrics.conversions,',
+        '  metrics.conversions_value',
+        'FROM campaign_search_term_insight',
+        'WHERE ' + dateClause,
+        '  AND campaign_search_term_insight.campaign_id = ' + campaignId
+      ].join('\n');
+
+      try {
+        const report = AdsApp.search(query);
+        while (report.hasNext()) {
+          const row = report.next();
+          const categoryLabel = row.campaignSearchTermInsight && row.campaignSearchTermInsight.categoryLabel
+            ? row.campaignSearchTermInsight.categoryLabel
+            : '';
+          const m = row.metrics || {};
+          const rowMetrics = {
+            impressions: Number(m.impressions) || 0,
+            clicks: Number(m.clicks) || 0,
+            cost: 0, // Not available in campaign_search_term_insight
+            conversions: Number(m.conversions) || 0,
+            conversionsValue: Number(m.conversionsValue) || 0
+          };
+
+          const branded = isBranded(categoryLabel);
+          if (branded) {
+            totals.branded.impressions += rowMetrics.impressions;
+            totals.branded.clicks += rowMetrics.clicks;
+            totals.branded.conversions += rowMetrics.conversions;
+            totals.branded.conversionsValue += rowMetrics.conversionsValue;
+          } else {
+            totals.nonBranded.impressions += rowMetrics.impressions;
+            totals.nonBranded.clicks += rowMetrics.clicks;
+            totals.nonBranded.conversions += rowMetrics.conversions;
+            totals.nonBranded.conversionsValue += rowMetrics.conversionsValue;
+          }
+          addRowToPeriodData(periodData, period.key, branded, rowMetrics);
+        }
+      } catch (e) {
+        Logger.log('[Pmax Categories] Error querying campaign ' + campaignId + ' for period ' + period.key + ': ' + e);
+      }
+    }
+  }
+
+  return { totals: totals, periodData: periodData };
+}
+
 function mergePeriodData(target, source) {
   let key;
   for (key in source) {
@@ -342,6 +492,20 @@ function buildRawTabRows(periodData) {
   return rows;
 }
 
+// Build raw rows for categories (no cost metrics available)
+function buildRawTabRowsNoCost(periodData) {
+  const periods = Object.keys(periodData).sort();
+  const rows = [];
+  rows.push(['Period', 'Segment', 'Impressions', 'Clicks', 'Conversions', 'Conversion Value']);
+  periods.forEach(function (periodKey) {
+    const p = periodData[periodKey];
+    const label = formatPeriodLabel(periodKey);
+    rows.push([label, 'Branded', p.branded.impressions, p.branded.clicks, p.branded.conversions, p.branded.conversionsValue]);
+    rows.push([label, 'Non-branded', p.nonBranded.impressions, p.nonBranded.clicks, p.nonBranded.conversions, p.nonBranded.conversionsValue]);
+  });
+  return rows;
+}
+
 // ===== SHEET: INFO + RAW TABS =====
 function getOrCreateSheet(ss, name) {
   let sh = ss.getSheetByName(name);
@@ -386,6 +550,15 @@ function writeInfoAndRawTabs(ss, combined, byType, dateRangeStr) {
         sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
       }
     });
+  }
+}
+
+function writePmaxCategoriesTab(ss, pmaxCategoriesData) {
+  if (!INCLUDE_PMAX_CATEGORIES || !pmaxCategoriesData) return;
+  const sh = getOrCreateSheet(ss, 'Raw - Pmax Categories');
+  const rows = buildRawTabRowsNoCost(pmaxCategoriesData.periodData);
+  if (rows.length > 1) {
+    sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
   }
 }
 
@@ -483,6 +656,77 @@ function writeAllCharts(ss, combined, byType) {
   }
 }
 
+// Charts for Pmax Categories (no cost metrics)
+function writeChartsForCategoriesView(ss, periodData, chartTabName, currency) {
+  const color1 = '#4285F4';
+  const color2 = '#FBBC05';
+  const currFmt = '"' + currency + '" #,##0.00';
+  const periodLabel = TIME_GRANULARITY === 'week' ? 'Week' : 'Month';
+
+  let chartSheet = ss.getSheetByName(chartTabName);
+  if (!chartSheet) {
+    chartSheet = ss.insertSheet(chartTabName);
+  }
+  chartSheet.clear();
+
+  // Only 4 metrics - no cost or CPA
+  const metrics = [
+    { valueType: 'impressions', title: 'Impressions', format: '#,##0' },
+    { valueType: 'clicks', title: 'Clicks', format: '#,##0' },
+    { valueType: 'conversions', title: 'Conversions', format: '#,##0.00' },
+    { valueType: 'conversionsValue', title: 'Conversion Value (' + currency + ')', format: currFmt }
+  ];
+
+  let startRow = 1;
+  const chartWidth = 600;
+  const chartHeight = 250;
+  const rowHeight = 25;
+
+  metrics.forEach(function (m, idx) {
+    const rows = buildChartDataRows(periodData, m.valueType);
+    if (rows.length === 0) return;
+
+    const header = [['Period', 'Branded', 'Non-branded']];
+    const allRows = header.concat(rows);
+    const numRows = allRows.length;
+    const dataStartRow = startRow + 1;
+    const numDataRows = numRows - 1;
+
+    chartSheet.getRange(startRow, 1, numRows, 3).setValues(allRows);
+    if (m.format && numDataRows >= 1) {
+      chartSheet.getRange(dataStartRow, 2, numDataRows, 2).setNumberFormat(m.format);
+    }
+
+    const dataRange = chartSheet.getRange(dataStartRow, 1, numDataRows, 3);
+    const chart = chartSheet.newChart()
+      .setChartType(Charts.ChartType.COLUMN)
+      .addRange(dataRange)
+      .setPosition(startRow + numRows, 1, 0, 0)
+      .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded) - Categories')
+      .setOption('legend', { position: 'bottom' })
+      .setOption('isStacked', true)
+      .setOption('series', {
+        0: { labelInLegend: 'Branded', color: color1 },
+        1: { labelInLegend: 'Non-branded', color: color2 }
+      })
+      .setOption('colors', [color1, color2])
+      .setOption('vAxis', { title: m.title, format: m.format ? 'decimal' : undefined })
+      .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+      .setOption('width', chartWidth)
+      .setOption('height', chartHeight)
+      .build();
+    chartSheet.insertChart(chart);
+
+    startRow += numRows + Math.ceil(chartHeight / rowHeight) + 2;
+  });
+}
+
+function writePmaxCategoriesCharts(ss, pmaxCategoriesData) {
+  if (!INCLUDE_PMAX_CATEGORIES || !pmaxCategoriesData) return;
+  const currency = AdsApp.currentAccount().getCurrencyCode();
+  writeChartsForCategoriesView(ss, pmaxCategoriesData.periodData, 'Charts - Pmax Categories', currency);
+}
+
 // ===== TAB ORDER =====
 function reorderTabs(ss) {
   const order = [
@@ -490,10 +734,12 @@ function reorderTabs(ss) {
     'Raw - Combined',
     'Raw - Search',
     'Raw - Pmax',
+    'Raw - Pmax Categories',
     'Raw - Shopping',
     'Charts - Combined',
     'Charts - Search',
     'Charts - Pmax',
+    'Charts - Pmax Categories',
     'Charts - Shopping'
   ];
   order.forEach(function (name, idx) {
@@ -537,11 +783,19 @@ function main() {
       };
     }
 
+    // Pmax Categories (Consumer Spotlight) - separate data source
+    let pmaxCategoriesData = null;
+    if (INCLUDE_PMAX_CATEGORIES) {
+      pmaxCategoriesData = processCampaignSearchTermInsight();
+    }
+
     const sheetId = getSheetId(SHEET_URL);
     const ss = SpreadsheetApp.openById(sheetId);
 
     writeInfoAndRawTabs(ss, combined, byType, dateRangeStr);
+    writePmaxCategoriesTab(ss, pmaxCategoriesData);
     writeAllCharts(ss, combined, byType);
+    writePmaxCategoriesCharts(ss, pmaxCategoriesData);
     reorderTabs(ss);
 
     Logger.log('Script completed successfully.');
