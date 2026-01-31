@@ -23,10 +23,10 @@
 // ===== CONFIGURATION =====
 const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1ysIP5kMNCuBI5uVzf6V-Xw6knCCSGMCEXw1B5i8zURY/edit?usp=sharing';
 
-// Date range: use lookback OR explicit start/end (yyyy-MM-dd)
-const LOOKBACK_DAYS = 90;
-const START_DATE = ''; // e.g. '2024-01-01'
-const END_DATE = '';   // e.g. '2024-12-31'
+// Date range: use explicit start/end when both set; otherwise use LOOKBACK_DAYS from today
+const LOOKBACK_DAYS = 90;  // Only used when START_DATE and END_DATE are empty
+const START_DATE = '';     // e.g. '2025-01-01' — set with END_DATE for custom range
+const END_DATE = '';      // e.g. '2026-01-30'
 
 // Use only brand-specific phrases (e.g. "foodsisters"). Avoid single common words like "sister"
 // or they will match generic queries (e.g. "book for sister") and over-count branded.
@@ -657,29 +657,30 @@ function writeChartsForView(ss, periodData, chartTabName, currency) {
   }
   chartSheet.clear();
 
+  // Metrics: useLineChart = true for CPA/ROAS (not stacked), skipRatio = true to skip ratio chart
   const metrics = [
-    { valueType: 'impressions', title: 'Impressions', format: '#,##0' },
-    { valueType: 'clicks', title: 'Clicks', format: '#,##0' },
-    { valueType: 'cost', title: 'Cost (' + currency + ')', format: currFmt },
-    { valueType: 'conversions', title: 'Conversions', format: '#,##0.00' },
-    { valueType: 'conversionsValue', title: 'Conversion Value (' + currency + ')', format: currFmt },
-    { valueType: 'cpa', title: 'Cost per Conversion (' + currency + ')', format: currFmt },
-    { valueType: 'roas', title: 'ROAS', format: '#,##0.00' }
+    { valueType: 'impressions', title: 'Impressions', format: '#,##0', useLineChart: false, skipRatio: false },
+    { valueType: 'clicks', title: 'Clicks', format: '#,##0', useLineChart: false, skipRatio: false },
+    { valueType: 'cost', title: 'Cost (' + currency + ')', format: currFmt, useLineChart: false, skipRatio: false },
+    { valueType: 'conversions', title: 'Conversions', format: '#,##0.00', useLineChart: false, skipRatio: false },
+    { valueType: 'conversionsValue', title: 'Conversion Value (' + currency + ')', format: currFmt, useLineChart: false, skipRatio: false },
+    { valueType: 'cpa', title: 'Cost per Conversion (' + currency + ')', format: currFmt, useLineChart: true, skipRatio: true },
+    { valueType: 'roas', title: 'ROAS', format: '#,##0.00', useLineChart: true, skipRatio: true }
   ];
 
   let startRow = 1;
   const chartWidth = 500;
-  const ratioChartWidth = 400;
+  const ratioChartWidth = 550;
   const chartHeight = 300;
   const rowHeight = 25;
-  const dataColStart = 1;  // Column A for bar chart data
+  const dataColStart = 1;  // Column A for chart data
   const ratioColStart = 5; // Column E for ratio data (leaving gap)
 
   metrics.forEach(function (m, idx) {
     const rows = buildChartDataRows(periodData, m.valueType);
     if (rows.length === 0) return;
 
-    // Bar chart data (columns A-C)
+    // Chart data (columns A-C)
     const header = [['Period', 'Branded', 'Non-branded']];
     const allRows = header.concat(rows);
     const numRows = allRows.length;
@@ -691,55 +692,87 @@ function writeChartsForView(ss, periodData, chartTabName, currency) {
       chartSheet.getRange(dataStartRow, dataColStart + 1, numDataRows, 2).setNumberFormat(m.format);
     }
 
-    // Ratio data (columns E-F)
-    const ratioRows = buildBrandedRatioRows(periodData, m.valueType, false);
-    const ratioHeader = [['Period', '% Branded']];
-    const allRatioRows = ratioHeader.concat(ratioRows);
-    chartSheet.getRange(startRow, ratioColStart, numRows, 2).setValues(allRatioRows);
-    chartSheet.getRange(dataStartRow, ratioColStart + 1, numDataRows, 1).setNumberFormat('0.0%');
+    // Ratio data (columns E-F) - only for metrics that need it
+    if (!m.skipRatio) {
+      const ratioRows = buildBrandedRatioRows(periodData, m.valueType, false);
+      const ratioHeader = [['Period', '% Branded']];
+      const allRatioRows = ratioHeader.concat(ratioRows);
+      chartSheet.getRange(startRow, ratioColStart, numRows, 2).setValues(allRatioRows);
+      chartSheet.getRange(dataStartRow, ratioColStart + 1, numDataRows, 1).setNumberFormat('0.0%');
+    }
 
-    // Bar chart (positioned below data, column A)
-    const dataRange = chartSheet.getRange(dataStartRow, dataColStart, numDataRows, 3);
-    const barChart = chartSheet.newChart()
-      .setChartType(Charts.ChartType.COLUMN)
-      .addRange(dataRange)
-      .setPosition(startRow + numRows, 1, 0, 0)
-      .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded)')
-      .setOption('legend', { position: 'bottom' })
-      .setOption('isStacked', true)
-      .setOption('series', {
-        0: { labelInLegend: 'Branded', color: color1 },
-        1: { labelInLegend: 'Non-branded', color: color2 }
-      })
-      .setOption('colors', [color1, color2])
-      .setOption('vAxis', { title: m.title })
-      .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
-      .setOption('width', chartWidth)
-      .setOption('height', chartHeight)
-      .build();
-    chartSheet.insertChart(barChart);
+    // Main chart (positioned below data, column A)
+    // Use separate ranges for x-axis and data series to fix label issues
+    const xAxisRange = chartSheet.getRange(startRow, dataColStart, numRows, 1);  // Period column with header
+    const dataSeriesRange = chartSheet.getRange(startRow, dataColStart + 1, numRows, 2);  // Branded, Non-branded with headers
 
-    // Ratio line chart (positioned to the right of bar chart)
-    const ratioXRange = chartSheet.getRange(startRow, ratioColStart, numRows, 1);
-    const ratioYRange = chartSheet.getRange(startRow, ratioColStart + 1, numRows, 1);
-    const ratioChart = chartSheet.newChart()
-      .setChartType(Charts.ChartType.LINE)
-      .addRange(ratioXRange)
-      .addRange(ratioYRange)
-      .setPosition(startRow + numRows, 7, 0, 0)  // Column G (to the right)
-      .setOption('title', 'Branded Dependency Ratio - ' + m.title)
-      .setOption('legend', { position: 'none' })
-      .setOption('pointSize', 5)
-      .setOption('series', {
-        0: { color: colorRatio }
-      })
-      .setOption('colors', [colorRatio])
-      .setOption('vAxis', { title: '% Branded', format: 'percent', minValue: 0, maxValue: 1 })
-      .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
-      .setOption('width', ratioChartWidth)
-      .setOption('height', chartHeight)
-      .build();
-    chartSheet.insertChart(ratioChart);
+    let mainChart;
+    if (m.useLineChart) {
+      // Line chart for CPA and ROAS (two lines, not stacked)
+      mainChart = chartSheet.newChart()
+        .setChartType(Charts.ChartType.LINE)
+        .addRange(xAxisRange)
+        .addRange(dataSeriesRange)
+        .setPosition(startRow + numRows, 1, 0, 0)
+        .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded)')
+        .setOption('legend', { position: 'bottom' })
+        .setOption('pointSize', 5)
+        .setOption('series', {
+          0: { labelInLegend: 'Branded', color: color1 },
+          1: { labelInLegend: 'Non-branded', color: color2 }
+        })
+        .setOption('colors', [color1, color2])
+        .setOption('vAxis', { title: m.title })
+        .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .build();
+    } else {
+      // Stacked column chart for volume metrics
+      mainChart = chartSheet.newChart()
+        .setChartType(Charts.ChartType.COLUMN)
+        .addRange(xAxisRange)
+        .addRange(dataSeriesRange)
+        .setPosition(startRow + numRows, 1, 0, 0)
+        .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded)')
+        .setOption('legend', { position: 'bottom' })
+        .setOption('isStacked', true)
+        .setOption('series', {
+          0: { labelInLegend: 'Branded', color: color1 },
+          1: { labelInLegend: 'Non-branded', color: color2 }
+        })
+        .setOption('colors', [color1, color2])
+        .setOption('vAxis', { title: m.title })
+        .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+        .setOption('width', chartWidth)
+        .setOption('height', chartHeight)
+        .build();
+    }
+    chartSheet.insertChart(mainChart);
+
+    // Ratio chart (positioned to the right) - only for metrics that need it
+    if (!m.skipRatio) {
+      // Data-only range (no header row) to avoid duplicate x-axis labels; enable Aggregate via applyAggregateData
+      const ratioDataOnly = chartSheet.getRange(startRow + 1, ratioColStart, numRows, ratioColStart + 1);
+      const ratioChart = chartSheet.newChart()
+        .setChartType(Charts.ChartType.AREA)
+        .addRange(ratioDataOnly)
+        .setPosition(startRow + numRows, 7, 0, 0)  // Column G (to the right)
+        .setOption('title', 'Branded Dependency Ratio - ' + m.title)
+        .setOption('legend', { position: 'none' })
+        .setOption('useFirstColumnAsDomain', true)
+        .setOption('applyAggregateData', 1)  // Enables "Aggregate" in UI so x-axis shows each period once
+        .setOption('series', {
+          0: { color: colorRatio }
+        })
+        .setOption('colors', [colorRatio])
+        .setOption('vAxis', { title: '% Branded', format: 'percent', minValue: 0, maxValue: 1 })
+        .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+        .setOption('width', ratioChartWidth)
+        .setOption('height', chartHeight)
+        .build();
+      chartSheet.insertChart(ratioChart);
+    }
 
     startRow += numRows + Math.ceil(chartHeight / rowHeight) + 2;
   });
@@ -795,7 +828,7 @@ function writeChartsForCategoriesView(ss, periodData, chartTabName, currency) {
 
   let startRow = 1;
   const chartWidth = 500;
-  const ratioChartWidth = 400;
+  const ratioChartWidth = 550;
   const chartHeight = 300;
   const rowHeight = 25;
   const dataColStart = 1;  // Column A for bar chart data
@@ -848,17 +881,17 @@ function writeChartsForCategoriesView(ss, periodData, chartTabName, currency) {
       .build();
     chartSheet.insertChart(barChart);
 
-    // Ratio line chart (positioned to the right of bar chart)
-    const ratioXRange = chartSheet.getRange(startRow, ratioColStart, numRows, 1);
-    const ratioYRange = chartSheet.getRange(startRow, ratioColStart + 1, numRows, 1);
+    // Ratio chart (positioned to the right of bar chart)
+    // Data-only range + applyAggregateData to fix x-axis duplicate labels
+    const ratioDataOnly = chartSheet.getRange(startRow + 1, ratioColStart, numRows, ratioColStart + 1);
     const ratioChart = chartSheet.newChart()
-      .setChartType(Charts.ChartType.LINE)
-      .addRange(ratioXRange)
-      .addRange(ratioYRange)
+      .setChartType(Charts.ChartType.AREA)
+      .addRange(ratioDataOnly)
       .setPosition(startRow + numRows, 8, 0, 0)  // Column H (to the right)
       .setOption('title', 'Branded Dependency Ratio - ' + m.title)
       .setOption('legend', { position: 'none' })
-      .setOption('pointSize', 5)
+      .setOption('useFirstColumnAsDomain', true)
+      .setOption('applyAggregateData', 1)  // Enables "Aggregate" in UI so x-axis shows each period once
       .setOption('series', {
         0: { color: colorRatio }
       })
