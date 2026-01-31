@@ -114,11 +114,33 @@ function emptyPeriodData() {
   };
 }
 
+// For Pmax Categories - includes blank category for unidentifiable search categories
+function emptyPeriodDataWithBlank() {
+  return {
+    branded: emptyMetrics(),
+    nonBranded: emptyMetrics(),
+    blank: emptyMetrics()
+  };
+}
+
 function addRowToPeriodData(periodData, periodKey, isBrandedRow, rowMetrics) {
   if (!periodData[periodKey]) {
     periodData[periodKey] = emptyPeriodData();
   }
   const target = isBrandedRow ? periodData[periodKey].branded : periodData[periodKey].nonBranded;
+  target.impressions += rowMetrics.impressions;
+  target.clicks += rowMetrics.clicks;
+  target.cost += rowMetrics.cost;
+  target.conversions += rowMetrics.conversions;
+  target.conversionsValue += rowMetrics.conversionsValue;
+}
+
+function addRowToPeriodDataWithBlank(periodData, periodKey, category, rowMetrics) {
+  // category: 'branded', 'nonBranded', or 'blank'
+  if (!periodData[periodKey]) {
+    periodData[periodKey] = emptyPeriodDataWithBlank();
+  }
+  const target = periodData[periodKey][category];
   target.impressions += rowMetrics.impressions;
   target.clicks += rowMetrics.clicks;
   target.cost += rowMetrics.cost;
@@ -367,7 +389,7 @@ function processCampaignSearchTermInsight() {
   const periodRanges = getPeriodRanges();
   Logger.log('[Pmax Categories] Processing ' + periodRanges.length + ' period(s).');
 
-  const totals = { branded: emptyMetrics(), nonBranded: emptyMetrics() };
+  const totals = { branded: emptyMetrics(), nonBranded: emptyMetrics(), blank: emptyMetrics() };
   const periodData = {};
 
   // Query each period separately (no segments needed)
@@ -405,19 +427,23 @@ function processCampaignSearchTermInsight() {
             conversionsValue: Number(m.conversionsValue) || 0
           };
 
-          const branded = isBranded(categoryLabel);
-          if (branded) {
-            totals.branded.impressions += rowMetrics.impressions;
-            totals.branded.clicks += rowMetrics.clicks;
-            totals.branded.conversions += rowMetrics.conversions;
-            totals.branded.conversionsValue += rowMetrics.conversionsValue;
+          // Determine category: blank, branded, or nonBranded
+          let category;
+          if (!categoryLabel || categoryLabel.trim() === '') {
+            category = 'blank';
+          } else if (isBranded(categoryLabel)) {
+            category = 'branded';
           } else {
-            totals.nonBranded.impressions += rowMetrics.impressions;
-            totals.nonBranded.clicks += rowMetrics.clicks;
-            totals.nonBranded.conversions += rowMetrics.conversions;
-            totals.nonBranded.conversionsValue += rowMetrics.conversionsValue;
+            category = 'nonBranded';
           }
-          addRowToPeriodData(periodData, period.key, branded, rowMetrics);
+
+          // Update totals
+          totals[category].impressions += rowMetrics.impressions;
+          totals[category].clicks += rowMetrics.clicks;
+          totals[category].conversions += rowMetrics.conversions;
+          totals[category].conversionsValue += rowMetrics.conversionsValue;
+
+          addRowToPeriodDataWithBlank(periodData, period.key, category, rowMetrics);
         }
       } catch (e) {
         Logger.log('[Pmax Categories] Error querying campaign ' + campaignId + ' for period ' + period.key + ': ' + e);
@@ -480,19 +506,21 @@ function formatPeriodLabel(periodKey) {
 function buildRawTabRows(periodData) {
   const periods = Object.keys(periodData).sort();
   const rows = [];
-  rows.push(['Period', 'Segment', 'Impressions', 'Clicks', 'Cost', 'Conversions', 'Conversion Value', 'CPA']);
+  rows.push(['Period', 'Segment', 'Impressions', 'Clicks', 'Cost', 'Conversions', 'Conversion Value', 'CPA', 'ROAS']);
   periods.forEach(function (periodKey) {
     const p = periodData[periodKey];
     const label = formatPeriodLabel(periodKey);
     const cpaB = p.branded.conversions > 0 ? p.branded.cost / p.branded.conversions : 0;
     const cpaN = p.nonBranded.conversions > 0 ? p.nonBranded.cost / p.nonBranded.conversions : 0;
-    rows.push([label, 'Branded', p.branded.impressions, p.branded.clicks, p.branded.cost, p.branded.conversions, p.branded.conversionsValue, cpaB]);
-    rows.push([label, 'Non-branded', p.nonBranded.impressions, p.nonBranded.clicks, p.nonBranded.cost, p.nonBranded.conversions, p.nonBranded.conversionsValue, cpaN]);
+    const roasB = p.branded.cost > 0 ? p.branded.conversionsValue / p.branded.cost : 0;
+    const roasN = p.nonBranded.cost > 0 ? p.nonBranded.conversionsValue / p.nonBranded.cost : 0;
+    rows.push([label, 'Branded', p.branded.impressions, p.branded.clicks, p.branded.cost, p.branded.conversions, p.branded.conversionsValue, cpaB, roasB]);
+    rows.push([label, 'Non-branded', p.nonBranded.impressions, p.nonBranded.clicks, p.nonBranded.cost, p.nonBranded.conversions, p.nonBranded.conversionsValue, cpaN, roasN]);
   });
   return rows;
 }
 
-// Build raw rows for categories (no cost metrics available)
+// Build raw rows for categories (no cost metrics available, includes blank)
 function buildRawTabRowsNoCost(periodData) {
   const periods = Object.keys(periodData).sort();
   const rows = [];
@@ -502,6 +530,10 @@ function buildRawTabRowsNoCost(periodData) {
     const label = formatPeriodLabel(periodKey);
     rows.push([label, 'Branded', p.branded.impressions, p.branded.clicks, p.branded.conversions, p.branded.conversionsValue]);
     rows.push([label, 'Non-branded', p.nonBranded.impressions, p.nonBranded.clicks, p.nonBranded.conversions, p.nonBranded.conversionsValue]);
+    // Blank category for unidentifiable search categories
+    if (p.blank) {
+      rows.push([label, 'Blank', p.blank.impressions, p.blank.clicks, p.blank.conversions, p.blank.conversionsValue]);
+    }
   });
   return rows;
 }
@@ -575,8 +607,39 @@ function buildChartDataRows(periodData, valueType) {
     if (valueType === 'cpa') {
       valB = p.branded.conversions > 0 ? p.branded.cost / p.branded.conversions : 0;
       valN = p.nonBranded.conversions > 0 ? p.nonBranded.cost / p.nonBranded.conversions : 0;
+    } else if (valueType === 'roas') {
+      valB = p.branded.cost > 0 ? p.branded.conversionsValue / p.branded.cost : 0;
+      valN = p.nonBranded.cost > 0 ? p.nonBranded.conversionsValue / p.nonBranded.cost : 0;
     }
     rows.push([label, valB, valN]);
+  });
+  return rows;
+}
+
+// Build branded ratio data (branded / total as percentage)
+function buildBrandedRatioRows(periodData, valueType, includeBlank) {
+  const periods = Object.keys(periodData).sort();
+  const rows = [];
+  periods.forEach(function (periodKey) {
+    const label = formatPeriodLabel(periodKey);
+    const p = periodData[periodKey];
+    let valB, valN, valBlank;
+    if (valueType === 'cpa') {
+      valB = p.branded.conversions > 0 ? p.branded.cost / p.branded.conversions : 0;
+      valN = p.nonBranded.conversions > 0 ? p.nonBranded.cost / p.nonBranded.conversions : 0;
+      valBlank = (includeBlank && p.blank && p.blank.conversions > 0) ? p.blank.cost / p.blank.conversions : 0;
+    } else if (valueType === 'roas') {
+      valB = p.branded.cost > 0 ? p.branded.conversionsValue / p.branded.cost : 0;
+      valN = p.nonBranded.cost > 0 ? p.nonBranded.conversionsValue / p.nonBranded.cost : 0;
+      valBlank = (includeBlank && p.blank && p.blank.cost > 0) ? p.blank.conversionsValue / p.blank.cost : 0;
+    } else {
+      valB = p.branded ? p.branded[valueType] || 0 : 0;
+      valN = p.nonBranded ? p.nonBranded[valueType] || 0 : 0;
+      valBlank = (includeBlank && p.blank) ? p.blank[valueType] || 0 : 0;
+    }
+    const total = valB + valN + (includeBlank ? valBlank : 0);
+    const ratio = total > 0 ? valB / total : 0;
+    rows.push([label, ratio]);
   });
   return rows;
 }
@@ -584,6 +647,7 @@ function buildChartDataRows(periodData, valueType) {
 function writeChartsForView(ss, periodData, chartTabName, currency) {
   const color1 = '#4285F4';
   const color2 = '#FBBC05';
+  const colorRatio = '#34A853';  // Green for ratio line
   const currFmt = '"' + currency + '" #,##0.00';
   const periodLabel = TIME_GRANULARITY === 'week' ? 'Week' : 'Month';
 
@@ -599,31 +663,44 @@ function writeChartsForView(ss, periodData, chartTabName, currency) {
     { valueType: 'cost', title: 'Cost (' + currency + ')', format: currFmt },
     { valueType: 'conversions', title: 'Conversions', format: '#,##0.00' },
     { valueType: 'conversionsValue', title: 'Conversion Value (' + currency + ')', format: currFmt },
-    { valueType: 'cpa', title: 'Cost per Conversion (' + currency + ')', format: currFmt }
+    { valueType: 'cpa', title: 'Cost per Conversion (' + currency + ')', format: currFmt },
+    { valueType: 'roas', title: 'ROAS', format: '#,##0.00' }
   ];
 
   let startRow = 1;
-  const chartWidth = 600;
-  const chartHeight = 250;
+  const chartWidth = 500;
+  const ratioChartWidth = 400;
+  const chartHeight = 300;
   const rowHeight = 25;
+  const dataColStart = 1;  // Column A for bar chart data
+  const ratioColStart = 5; // Column E for ratio data (leaving gap)
 
   metrics.forEach(function (m, idx) {
     const rows = buildChartDataRows(periodData, m.valueType);
     if (rows.length === 0) return;
 
+    // Bar chart data (columns A-C)
     const header = [['Period', 'Branded', 'Non-branded']];
     const allRows = header.concat(rows);
     const numRows = allRows.length;
     const dataStartRow = startRow + 1;
     const numDataRows = numRows - 1;
 
-    chartSheet.getRange(startRow, 1, numRows, 3).setValues(allRows);
+    chartSheet.getRange(startRow, dataColStart, numRows, 3).setValues(allRows);
     if (m.format && numDataRows >= 1) {
-      chartSheet.getRange(dataStartRow, 2, numDataRows, 2).setNumberFormat(m.format); // cols B and C
+      chartSheet.getRange(dataStartRow, dataColStart + 1, numDataRows, 2).setNumberFormat(m.format);
     }
 
-    const dataRange = chartSheet.getRange(dataStartRow, 1, numDataRows, 3);
-    const chart = chartSheet.newChart()
+    // Ratio data (columns E-F)
+    const ratioRows = buildBrandedRatioRows(periodData, m.valueType, false);
+    const ratioHeader = [['Period', '% Branded']];
+    const allRatioRows = ratioHeader.concat(ratioRows);
+    chartSheet.getRange(startRow, ratioColStart, numRows, 2).setValues(allRatioRows);
+    chartSheet.getRange(dataStartRow, ratioColStart + 1, numDataRows, 1).setNumberFormat('0.0%');
+
+    // Bar chart (positioned below data, column A)
+    const dataRange = chartSheet.getRange(dataStartRow, dataColStart, numDataRows, 3);
+    const barChart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COLUMN)
       .addRange(dataRange)
       .setPosition(startRow + numRows, 1, 0, 0)
@@ -635,12 +712,34 @@ function writeChartsForView(ss, periodData, chartTabName, currency) {
         1: { labelInLegend: 'Non-branded', color: color2 }
       })
       .setOption('colors', [color1, color2])
-      .setOption('vAxis', { title: m.title, format: m.format ? 'decimal' : undefined })
+      .setOption('vAxis', { title: m.title })
       .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
       .setOption('width', chartWidth)
       .setOption('height', chartHeight)
       .build();
-    chartSheet.insertChart(chart);
+    chartSheet.insertChart(barChart);
+
+    // Ratio line chart (positioned to the right of bar chart)
+    const ratioXRange = chartSheet.getRange(startRow, ratioColStart, numRows, 1);
+    const ratioYRange = chartSheet.getRange(startRow, ratioColStart + 1, numRows, 1);
+    const ratioChart = chartSheet.newChart()
+      .setChartType(Charts.ChartType.LINE)
+      .addRange(ratioXRange)
+      .addRange(ratioYRange)
+      .setPosition(startRow + numRows, 7, 0, 0)  // Column G (to the right)
+      .setOption('title', 'Branded Dependency Ratio - ' + m.title)
+      .setOption('legend', { position: 'none' })
+      .setOption('pointSize', 5)
+      .setOption('series', {
+        0: { color: colorRatio }
+      })
+      .setOption('colors', [colorRatio])
+      .setOption('vAxis', { title: '% Branded', format: 'percent', minValue: 0, maxValue: 1 })
+      .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+      .setOption('width', ratioChartWidth)
+      .setOption('height', chartHeight)
+      .build();
+    chartSheet.insertChart(ratioChart);
 
     startRow += numRows + Math.ceil(chartHeight / rowHeight) + 2;
   });
@@ -656,10 +755,27 @@ function writeAllCharts(ss, combined, byType) {
   }
 }
 
-// Charts for Pmax Categories (no cost metrics)
+// Build chart data rows for categories view (includes blank)
+function buildChartDataRowsWithBlank(periodData, valueType) {
+  const periods = Object.keys(periodData).sort();
+  const rows = [];
+  periods.forEach(function (periodKey) {
+    const label = formatPeriodLabel(periodKey);
+    const p = periodData[periodKey];
+    const valB = p.branded ? p.branded[valueType] || 0 : 0;
+    const valN = p.nonBranded ? p.nonBranded[valueType] || 0 : 0;
+    const valBlank = p.blank ? p.blank[valueType] || 0 : 0;
+    rows.push([label, valB, valN, valBlank]);
+  });
+  return rows;
+}
+
+// Charts for Pmax Categories (no cost metrics, includes blank, stacked column charts + ratio line charts)
 function writeChartsForCategoriesView(ss, periodData, chartTabName, currency) {
-  const color1 = '#4285F4';
-  const color2 = '#FBBC05';
+  const color1 = '#4285F4';  // Blue for branded
+  const color2 = '#FBBC05';  // Yellow for non-branded
+  const color3 = '#BEBEBE';  // Gray for blank
+  const colorRatio = '#34A853';  // Green for ratio line
   const currFmt = '"' + currency + '" #,##0.00';
   const periodLabel = TIME_GRANULARITY === 'week' ? 'Week' : 'Month';
 
@@ -678,44 +794,81 @@ function writeChartsForCategoriesView(ss, periodData, chartTabName, currency) {
   ];
 
   let startRow = 1;
-  const chartWidth = 600;
-  const chartHeight = 250;
+  const chartWidth = 500;
+  const ratioChartWidth = 400;
+  const chartHeight = 300;
   const rowHeight = 25;
+  const dataColStart = 1;  // Column A for bar chart data
+  const ratioColStart = 6; // Column F for ratio data (leaving gap after D)
 
   metrics.forEach(function (m, idx) {
-    const rows = buildChartDataRows(periodData, m.valueType);
+    const rows = buildChartDataRowsWithBlank(periodData, m.valueType);
     if (rows.length === 0) return;
 
-    const header = [['Period', 'Branded', 'Non-branded']];
+    // Bar chart data (columns A-D): Period, Branded, Non-branded, Blank
+    const header = [['Period', 'Branded', 'Non-branded', 'Blank']];
     const allRows = header.concat(rows);
     const numRows = allRows.length;
-    const dataStartRow = startRow + 1;
-    const numDataRows = numRows - 1;
+    const numDataRows = rows.length;
 
-    chartSheet.getRange(startRow, 1, numRows, 3).setValues(allRows);
+    chartSheet.getRange(startRow, dataColStart, numRows, 4).setValues(allRows);
     if (m.format && numDataRows >= 1) {
-      chartSheet.getRange(dataStartRow, 2, numDataRows, 2).setNumberFormat(m.format);
+      chartSheet.getRange(startRow + 1, dataColStart + 1, numDataRows, 3).setNumberFormat(m.format);
     }
 
-    const dataRange = chartSheet.getRange(dataStartRow, 1, numDataRows, 3);
-    const chart = chartSheet.newChart()
+    // Ratio data (columns F-G) - includeBlank = true for categories
+    const ratioRows = buildBrandedRatioRows(periodData, m.valueType, true);
+    const ratioHeader = [['Period', '% Branded']];
+    const allRatioRows = ratioHeader.concat(ratioRows);
+    chartSheet.getRange(startRow, ratioColStart, numRows, 2).setValues(allRatioRows);
+    chartSheet.getRange(startRow + 1, ratioColStart + 1, numDataRows, 1).setNumberFormat('0.0%');
+
+    // Bar chart (positioned below data, column A)
+    const xAxisRange = chartSheet.getRange(startRow, dataColStart, numRows, 1);
+    const dataSeriesRange = chartSheet.getRange(startRow, dataColStart + 1, numRows, 3);
+    
+    const barChart = chartSheet.newChart()
       .setChartType(Charts.ChartType.COLUMN)
-      .addRange(dataRange)
+      .addRange(xAxisRange)
+      .addRange(dataSeriesRange)
       .setPosition(startRow + numRows, 1, 0, 0)
-      .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded) - Categories')
+      .setOption('title', m.title + ' by ' + periodLabel + ' (Branded vs Non-branded) - Consumer Spotlight')
       .setOption('legend', { position: 'bottom' })
       .setOption('isStacked', true)
       .setOption('series', {
         0: { labelInLegend: 'Branded', color: color1 },
-        1: { labelInLegend: 'Non-branded', color: color2 }
+        1: { labelInLegend: 'Non-branded', color: color2 },
+        2: { labelInLegend: 'Blank', color: color3 }
       })
-      .setOption('colors', [color1, color2])
-      .setOption('vAxis', { title: m.title, format: m.format ? 'decimal' : undefined })
+      .setOption('colors', [color1, color2, color3])
+      .setOption('vAxis', { title: m.title })
       .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
       .setOption('width', chartWidth)
       .setOption('height', chartHeight)
       .build();
-    chartSheet.insertChart(chart);
+    chartSheet.insertChart(barChart);
+
+    // Ratio line chart (positioned to the right of bar chart)
+    const ratioXRange = chartSheet.getRange(startRow, ratioColStart, numRows, 1);
+    const ratioYRange = chartSheet.getRange(startRow, ratioColStart + 1, numRows, 1);
+    const ratioChart = chartSheet.newChart()
+      .setChartType(Charts.ChartType.LINE)
+      .addRange(ratioXRange)
+      .addRange(ratioYRange)
+      .setPosition(startRow + numRows, 8, 0, 0)  // Column H (to the right)
+      .setOption('title', 'Branded Dependency Ratio - ' + m.title)
+      .setOption('legend', { position: 'none' })
+      .setOption('pointSize', 5)
+      .setOption('series', {
+        0: { color: colorRatio }
+      })
+      .setOption('colors', [colorRatio])
+      .setOption('vAxis', { title: '% Branded', format: 'percent', minValue: 0, maxValue: 1 })
+      .setOption('hAxis', { title: periodLabel, slantedText: true, slantedTextAngle: 45 })
+      .setOption('width', ratioChartWidth)
+      .setOption('height', chartHeight)
+      .build();
+    chartSheet.insertChart(ratioChart);
 
     startRow += numRows + Math.ceil(chartHeight / rowHeight) + 2;
   });
